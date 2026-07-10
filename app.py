@@ -32,6 +32,7 @@ class HexViewerApp(tk.Tk):
         self.visible_rows = 30
         self.render_offset_width = 8
         self.render_hex_width = len("hex bytes")
+        self.scroll_to_byte_index: int | None = None
         self.formatting_search = False
 
         self._build_ui()
@@ -203,6 +204,8 @@ class HexViewerApp(tk.Tk):
 
     def _jump_to_match(self) -> None:
         data_index = self.matches[self.current_match_index]
+        self.selected_byte_index = data_index
+        self.scroll_to_byte_index = data_index
         line = self.model.line_for_data_index(data_index, self.bytes_per_line)
         self._set_top_line(max(0, line - self.visible_rows // 2))
         address = self.model.base_address + data_index
@@ -221,6 +224,7 @@ class HexViewerApp(tk.Tk):
 
         data_index = self.model.data_index_for_address(address)
         self.selected_byte_index = data_index
+        self.scroll_to_byte_index = data_index
         line = self.model.line_for_data_index(data_index, self.bytes_per_line)
         self._set_top_line(line)
         actual = self.model.base_address + data_index
@@ -258,7 +262,11 @@ class HexViewerApp(tk.Tk):
         self._highlight_current_match(offset_width, hex_width)
         self._highlight_selected_byte(offset_width, hex_width)
         self.text.configure(state="disabled")
-        self.text.xview_moveto(x_position)
+        if self.scroll_to_byte_index is None:
+            self.text.xview_moveto(x_position)
+        else:
+            self._scroll_to_byte(self.scroll_to_byte_index, offset_width, hex_width)
+            self.scroll_to_byte_index = None
         self._update_vertical_scrollbar()
 
     def _highlight_current_match(self, offset_width: int, hex_width: int) -> None:
@@ -304,6 +312,16 @@ class HexViewerApp(tk.Tk):
         ascii_column = ascii_start + byte_column
         self.text.tag_add(tag, f"{visible_line}.{hex_column}", f"{visible_line}.{hex_column + 2}")
         self.text.tag_add(tag, f"{visible_line}.{ascii_column}", f"{visible_line}.{ascii_column + 1}")
+
+    def _scroll_to_byte(self, data_index: int, offset_width: int, hex_width: int) -> None:
+        line_index = data_index // self.bytes_per_line
+        visible_line = line_index - self.top_line + 2
+        if visible_line < 2 or visible_line > self.visible_rows + 1:
+            return
+
+        byte_column = data_index % self.bytes_per_line
+        hex_column = offset_width + 2 + byte_column * 3
+        self.text.see(f"{visible_line}.{hex_column}")
 
     def _on_vertical_scroll(self, *args: str) -> None:
         if args[0] == "moveto":
