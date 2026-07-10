@@ -20,6 +20,7 @@ class HexViewerApp(tk.Tk):
         self.bytes_per_line_var = tk.StringVar(value=str(DEFAULT_BYTES_PER_LINE))
         self.search_var = tk.StringVar(value="")
         self.jump_var = tk.StringVar(value="")
+        self.offset_base_var = tk.StringVar(value="10")
         self.status_var = tk.StringVar(value="请选择文件。")
 
         self.bytes_per_line = DEFAULT_BYTES_PER_LINE
@@ -28,6 +29,7 @@ class HexViewerApp(tk.Tk):
         self.current_match_index = -1
         self.current_match_length = 0
         self.visible_rows = 30
+        self.formatting_search = False
 
         self._build_ui()
         self._bind_events()
@@ -52,7 +54,15 @@ class HexViewerApp(tk.Tk):
         ttk.Label(controls, text="偏移").grid(row=0, column=9, padx=(0, 4))
         self.jump_entry = ttk.Entry(controls, textvariable=self.jump_var, width=12)
         self.jump_entry.grid(row=0, column=10, padx=(0, 4))
-        ttk.Button(controls, text="跳转", command=self._jump_to_offset).grid(row=0, column=11)
+        self.offset_base = ttk.Combobox(
+            controls,
+            textvariable=self.offset_base_var,
+            values=("10", "16"),
+            width=4,
+            state="readonly",
+        )
+        self.offset_base.grid(row=0, column=11, padx=(0, 4))
+        ttk.Button(controls, text="跳转", command=self._jump_to_offset).grid(row=0, column=12)
 
         body = ttk.Frame(self, padding=(10, 0, 10, 4))
         body.grid(row=1, column=0, sticky="nsew")
@@ -81,6 +91,8 @@ class HexViewerApp(tk.Tk):
 
     def _bind_events(self) -> None:
         self.bytes_per_line_var.trace_add("write", self._on_bytes_per_line_changed)
+        self.search_var.trace_add("write", self._on_search_changed)
+        self.offset_base_var.trace_add("write", self._on_offset_base_changed)
         self.text.bind("<Configure>", self._on_text_configure)
         self.text.bind("<MouseWheel>", self._on_mouse_wheel)
         self.text.bind("<Prior>", lambda _event: self._move_lines(-self.visible_rows))
@@ -131,6 +143,23 @@ class HexViewerApp(tk.Tk):
         self.top_line = min(self.top_line, self._max_top_line())
         self._render()
 
+    def _on_search_changed(self, *_args: object) -> None:
+        if self.formatting_search:
+            return
+
+        text = self.search_var.get()
+        formatted = format_search_text(text)
+        if formatted == text:
+            return
+
+        self.formatting_search = True
+        self.search_var.set(formatted)
+        self.formatting_search = False
+        self.search_entry.icursor("end")
+
+    def _on_offset_base_changed(self, *_args: object) -> None:
+        self._render()
+
     def _search(self) -> None:
         try:
             pattern = compile_pattern(self.search_var.get())
@@ -171,7 +200,7 @@ class HexViewerApp(tk.Tk):
         line = self.model.line_for_data_index(data_index, self.bytes_per_line)
         self._set_top_line(max(0, line - self.visible_rows // 2))
         address = self.model.base_address + data_index
-        self.status_var.set(f"结果 {self.current_match_index + 1}/{len(self.matches)}，偏移 0x{address:X}。")
+        self.status_var.set(f"结果 {self.current_match_index + 1}/{len(self.matches)}，偏移 {self._format_offset(address)}。")
 
     def _jump_to_offset(self) -> None:
         text = self.jump_var.get().strip()
@@ -179,16 +208,16 @@ class HexViewerApp(tk.Tk):
             return
 
         try:
-            address = int(text[2:] if text.lower().startswith("0x") else text, 16)
+            address = self._parse_offset(text)
         except ValueError:
-            messagebox.showwarning("偏移格式错误", "偏移请输入十六进制数，例如 0x1A0 或 1A0。")
+            messagebox.showwarning("偏移格式错误", "偏移请输入当前进制下的有效整数。")
             return
 
         data_index = self.model.data_index_for_address(address)
         line = self.model.line_for_data_index(data_index, self.bytes_per_line)
         self._set_top_line(line)
         actual = self.model.base_address + data_index
-        self.status_var.set(f"已跳转到偏移 0x{actual:X}。")
+        self.status_var.set(f"已跳转到偏移 {self._format_offset(actual)}。")
 
     def _render(self) -> None:
         self.visible_rows = self._calculate_visible_rows()
@@ -211,7 +240,7 @@ class HexViewerApp(tk.Tk):
         rows: list[str] = []
         rows.append(f"{'offset'.ljust(offset_width)}  {'hex bytes'.ljust(hex_width)}  ASCII")
         for line in rendered_lines:
-            rows.append(f"{line.address:0{offset_width}X}  {line.hex_text.ljust(hex_width)}  {line.ascii_text}")
+            rows.append(f"{self._format_offset_for_table(line.address, offset_width)}  {line.hex_text.ljust(hex_width)}  {line.ascii_text}")
 
         self.text.configure(state="normal")
         self.text.delete("1.0", "end")
@@ -292,11 +321,36 @@ class HexViewerApp(tk.Tk):
         self.y_scroll.set(first, last)
 
     def _offset_width(self) -> int:
-        return max(8, len(f"{self.model.last_address:X}"))
+        if self.offset_base_var.get() == "16":
+            return max(8, len(f"{self.model.last_address:X}"))
+        return max(8, len(str(self.model.last_address)))
 
     def _file_status(self, source_type: str) -> str:
         kind = "Intel HEX" if source_type == "intel_hex" else "二进制"
-        return f"已加载 {kind} 数据，大小 {self.model.size} 字节，起始偏移 0x{self.model.base_address:X}。"
+        return f"已加载 {kind} 数据，大小 {self.model.size} 字节，起始偏移 {self._format_offset(self.model.base_address)}。"
+
+    def _parse_offset(self, text: str) -> int:
+        if text.lower().startswith("0x"):
+            return int(text[2:], 16)
+        return int(text, int(self.offset_base_var.get()))
+
+    def _format_offset(self, value: int) -> str:
+        if self.offset_base_var.get() == "16":
+            return f"0x{value:X}"
+        return str(value)
+
+    def _format_offset_for_table(self, value: int, width: int) -> str:
+        if self.offset_base_var.get() == "16":
+            return f"{value:0{width}X}"
+        return f"{value:0{width}d}"
+
+
+def format_search_text(text: str) -> str:
+    # The search box groups nibbles as bytes while keeping an unfinished trailing
+    # nibble visible, so typing 49F becomes "49 F" and searches as 49 F?.
+    compact = "".join(char for char in text if not char.isspace())
+    groups = [compact[index : index + 2] for index in range(0, len(compact), 2)]
+    return " ".join(groups)
 
 
 if __name__ == "__main__":

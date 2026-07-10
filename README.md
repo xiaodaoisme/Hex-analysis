@@ -9,7 +9,8 @@ Windows desktop hex viewer built with Python and tkinter.
 - Configure bytes per row with positive integers only.
 - Use the horizontal scrollbar for very wide rows.
 - Search byte-boundary hex patterns with `?` nibble wildcards.
-- Jump to offsets such as `0x1A0` or `1A0`.
+- Type odd nibble counts such as `49F`; it is searched as `49 F?`.
+- Jump to offsets with decimal by default, or switch the offset base to hexadecimal.
 
 ## Run
 

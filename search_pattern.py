@@ -24,8 +24,9 @@ def compile_pattern(text: str) -> CompiledPattern:
         if char not in "0123456789abcdefABCDEF?":
             raise SearchPatternError("搜索内容只能包含 0-9、A-F、? 和空格。")
 
+    # A trailing single nibble means matching the high nibble of the next byte.
     if len(compact) % 2:
-        raise SearchPatternError("搜索内容必须由偶数个半字节组成，例如 A? 或 0F。")
+        compact += "?"
 
     values: list[int] = []
     masks: list[int] = []
