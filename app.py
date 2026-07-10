@@ -29,6 +29,9 @@ class HexViewerApp(tk.Tk):
         self.current_match_index = -1
         self.current_match_length = 0
         self.selected_byte_index: int | None = None
+        self.selection_anchor_index: int | None = None
+        self.selection_range: tuple[int, int] | None = None
+        self.is_dirty = False
         self.visible_rows = 30
         self.render_offset_width = 8
         self.render_hex_width = len("hex bytes")
@@ -37,6 +40,7 @@ class HexViewerApp(tk.Tk):
 
         self._build_ui()
         self._bind_events()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._render()
 
     def _build_ui(self) -> None:
@@ -66,7 +70,9 @@ class HexViewerApp(tk.Tk):
             state="readonly",
         )
         self.offset_base.grid(row=0, column=11, padx=(0, 4))
-        ttk.Button(controls, text="跳转", command=self._jump_to_offset).grid(row=0, column=12)
+        ttk.Button(controls, text="跳转", command=self._jump_to_offset).grid(row=0, column=12, padx=(0, 4))
+        ttk.Button(controls, text="删除选中", command=self._delete_selection).grid(row=0, column=13, padx=(0, 4))
+        ttk.Button(controls, text="保存", command=self._save_file).grid(row=0, column=14)
 
         body = ttk.Frame(self, padding=(10, 0, 10, 4))
         body.grid(row=1, column=0, sticky="nsew")
@@ -80,7 +86,7 @@ class HexViewerApp(tk.Tk):
         self.text.grid(row=0, column=0, sticky="nsew")
         self.text.configure(state="disabled")
         self.text.tag_configure("current_match", background="#F9D65C", foreground="#111111")
-        self.text.tag_configure("selected_byte", background="#24476F", foreground="#FFFFFF")
+        self.text.tag_configure("selected_byte", background="#F9D65C", foreground="#111111")
         self.text.tag_configure("header", foreground="#666666")
 
         y_scroll = ttk.Scrollbar(body, orient="vertical", command=self._on_vertical_scroll)
@@ -90,6 +96,9 @@ class HexViewerApp(tk.Tk):
         x_scroll = ttk.Scrollbar(body, orient="horizontal", command=self.text.xview)
         x_scroll.grid(row=1, column=0, sticky="ew")
         self.text.configure(xscrollcommand=x_scroll.set)
+
+        self.context_menu = tk.Menu(self, tearoff=False)
+        self.context_menu.add_command(label="删除选中", command=self._delete_selection)
 
         status = ttk.Label(self, textvariable=self.status_var, anchor="w", padding=(10, 4))
         status.grid(row=2, column=0, sticky="ew")
@@ -101,6 +110,9 @@ class HexViewerApp(tk.Tk):
         self.text.bind("<Configure>", self._on_text_configure)
         self.text.bind("<MouseWheel>", self._on_mouse_wheel)
         self.text.bind("<Button-1>", self._on_text_click)
+        self.text.bind("<B1-Motion>", self._on_text_drag)
+        self.text.bind("<ButtonRelease-1>", self._on_text_release)
+        self.text.bind("<Button-3>", self._on_text_right_click)
         self.text.bind("<Prior>", lambda _event: self._move_lines(-self.visible_rows))
         self.text.bind("<Next>", lambda _event: self._move_lines(self.visible_rows))
         self.text.bind("<Home>", lambda _event: self._set_top_line(0))
@@ -111,6 +123,9 @@ class HexViewerApp(tk.Tk):
         self.jump_entry.bind("<Return>", lambda _event: self._jump_to_offset())
 
     def _open_file(self) -> None:
+        if not self._confirm_discard_or_save():
+            return
+
         path = filedialog.askopenfilename(title="打开二进制或 Intel HEX 文件")
         if not path:
             return
@@ -127,9 +142,29 @@ class HexViewerApp(tk.Tk):
         self.current_match_index = -1
         self.current_match_length = 0
         self.selected_byte_index = None
+        self.selection_anchor_index = None
+        self.selection_range = None
+        self.is_dirty = False
         self.top_line = 0
         self.status_var.set(self._file_status(loaded.source_type))
         self._render()
+
+    def _save_file(self) -> bool:
+        path = self.file_path.get()
+        if not path:
+            messagebox.showwarning("保存失败", "请先打开文件。")
+            return False
+
+        try:
+            with open(path, "wb") as file:
+                file.write(self.model.data)
+        except OSError as exc:
+            messagebox.showerror("保存失败", str(exc))
+            return False
+
+        self.is_dirty = False
+        self.status_var.set(f"已保存 {self.model.size} 字节到当前文件。")
+        return True
 
     def _on_bytes_per_line_changed(self, *_args: object) -> None:
         text = self.bytes_per_line_var.get().strip()
@@ -204,7 +239,7 @@ class HexViewerApp(tk.Tk):
 
     def _jump_to_match(self) -> None:
         data_index = self.matches[self.current_match_index]
-        self.selected_byte_index = data_index
+        self._select_single_byte(data_index)
         self.scroll_to_byte_index = data_index
         line = self.model.line_for_data_index(data_index, self.bytes_per_line)
         self._set_top_line(max(0, line - self.visible_rows // 2))
@@ -223,7 +258,7 @@ class HexViewerApp(tk.Tk):
             return
 
         data_index = self.model.data_index_for_address(address)
-        self.selected_byte_index = data_index
+        self._select_single_byte(data_index)
         self.scroll_to_byte_index = data_index
         line = self.model.line_for_data_index(data_index, self.bytes_per_line)
         self._set_top_line(line)
@@ -293,10 +328,13 @@ class HexViewerApp(tk.Tk):
 
     def _highlight_selected_byte(self, offset_width: int, hex_width: int) -> None:
         self.text.tag_remove("selected_byte", "1.0", "end")
-        if self.selected_byte_index is None:
+        bounds = self._selection_bounds()
+        if bounds is None:
             return
 
-        self._tag_byte("selected_byte", self.selected_byte_index, offset_width, hex_width)
+        start, end = bounds
+        for data_index in range(start, end + 1):
+            self._tag_byte("selected_byte", data_index, offset_width, hex_width)
         self.text.tag_raise("selected_byte")
 
     def _tag_byte(self, tag: str, data_index: int, offset_width: int, hex_width: int) -> None:
@@ -341,12 +379,76 @@ class HexViewerApp(tk.Tk):
         if data_index is None:
             return "break"
 
-        self.selected_byte_index = data_index
-        address = self.model.base_address + data_index
-        value = self.model.data[data_index]
-        self.status_var.set(f"已选中偏移 {self._format_offset(address)}，字节 0x{value:02X}。")
+        self.selection_anchor_index = data_index
+        self._select_single_byte(data_index)
+        self._set_selection_status()
         self._render()
         return "break"
+
+    def _on_text_drag(self, event: tk.Event) -> str:
+        data_index = self._data_index_from_text_position(event.x, event.y)
+        if data_index is None or self.selection_anchor_index is None:
+            return "break"
+
+        start = min(self.selection_anchor_index, data_index)
+        end = max(self.selection_anchor_index, data_index)
+        self.selected_byte_index = data_index
+        self.selection_range = (start, end)
+        self._set_selection_status()
+        self._render()
+        return "break"
+
+    def _on_text_release(self, _event: tk.Event) -> str:
+        self.selection_anchor_index = None
+        return "break"
+
+    def _on_text_right_click(self, event: tk.Event) -> str:
+        data_index = self._data_index_from_text_position(event.x, event.y)
+        if data_index is not None and not self._selection_contains(data_index):
+            self._select_single_byte(data_index)
+            self._set_selection_status()
+            self._render()
+
+        self.context_menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
+    def _delete_selection(self) -> None:
+        bounds = self._selection_bounds()
+        if bounds is None:
+            self.status_var.set("请先选择要删除的字节。")
+            return
+
+        start, end = bounds
+        count = end - start + 1
+        data = self.model.data[:start] + self.model.data[end + 1 :]
+        self.model = ViewerModel(data, self.model.base_address)
+        self.is_dirty = True
+        self.matches = []
+        self.current_match_index = -1
+        self.current_match_length = 0
+        next_index = min(start, max(0, self.model.size - 1))
+        self.selection_range = None
+        self.selection_anchor_index = None
+        self.selected_byte_index = next_index if self.model.size else None
+        self.scroll_to_byte_index = self.selected_byte_index
+        self.top_line = min(self.top_line, self._max_top_line())
+        self.status_var.set(f"已删除 {count} 字节，保存后写回文件。")
+        self._render()
+
+    def _confirm_discard_or_save(self) -> bool:
+        if not self.is_dirty:
+            return True
+
+        result = messagebox.askyesnocancel("未保存修改", "当前文件有未保存修改，是否保存？")
+        if result is None:
+            return False
+        if result:
+            return self._save_file()
+        return True
+
+    def _on_close(self) -> None:
+        if self._confirm_discard_or_save():
+            self.destroy()
 
     def _data_index_from_text_position(self, x: int, y: int) -> int | None:
         # Translate a click in either the hex byte column or ASCII column back to
@@ -377,6 +479,41 @@ class HexViewerApp(tk.Tk):
         if data_index >= self.model.size:
             return None
         return data_index
+
+    def _select_single_byte(self, data_index: int) -> None:
+        self.selected_byte_index = data_index
+        self.selection_range = (data_index, data_index)
+
+    def _selection_bounds(self) -> tuple[int, int] | None:
+        if self.selection_range is None:
+            return None
+        start, end = self.selection_range
+        return min(start, end), max(start, end)
+
+    def _selection_contains(self, data_index: int) -> bool:
+        bounds = self._selection_bounds()
+        if bounds is None:
+            return False
+        start, end = bounds
+        return start <= data_index <= end
+
+    def _set_selection_status(self) -> None:
+        bounds = self._selection_bounds()
+        if bounds is None or self.selected_byte_index is None:
+            return
+
+        start, end = bounds
+        selected_address = self.model.base_address + self.selected_byte_index
+        if start == end:
+            value = self.model.data[self.selected_byte_index]
+            self.status_var.set(f"已选中偏移 {self._format_offset(selected_address)}，字节 0x{value:02X}。")
+            return
+
+        start_address = self.model.base_address + start
+        end_address = self.model.base_address + end
+        self.status_var.set(
+            f"已选择 {end - start + 1} 字节，范围 {self._format_offset(start_address)} - {self._format_offset(end_address)}。"
+        )
 
     def _on_text_configure(self, _event: tk.Event) -> None:
         rows = self._calculate_visible_rows()
