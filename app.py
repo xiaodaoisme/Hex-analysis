@@ -61,8 +61,8 @@ class HexViewerApp(tk.Tk):
         self.rowconfigure(1, weight=1)
         self.columnconfigure(0, weight=1)
 
-        text_font = font.Font(family="Consolas", size=10)
-        self.text = tk.Text(body, wrap="none", font=text_font, undo=False, height=20)
+        self.text_font = font.Font(family="Consolas", size=10)
+        self.text = tk.Text(body, wrap="none", font=self.text_font, undo=False, height=20)
         self.text.grid(row=0, column=0, sticky="nsew")
         self.text.configure(state="disabled")
         self.text.tag_configure("current_match", background="#F9D65C", foreground="#111111")
@@ -264,7 +264,7 @@ class HexViewerApp(tk.Tk):
             self._render()
 
     def _calculate_visible_rows(self) -> int:
-        line_height = font.nametofont(self.text.cget("font")).metrics("linespace")
+        line_height = self.text_font.metrics("linespace")
         height = self.text.winfo_height()
         if height <= 1:
             return self.visible_rows
