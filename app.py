@@ -28,7 +28,10 @@ class HexViewerApp(tk.Tk):
         self.matches: list[int] = []
         self.current_match_index = -1
         self.current_match_length = 0
+        self.selected_byte_index: int | None = None
         self.visible_rows = 30
+        self.render_offset_width = 8
+        self.render_hex_width = len("hex bytes")
         self.formatting_search = False
 
         self._build_ui()
@@ -76,6 +79,7 @@ class HexViewerApp(tk.Tk):
         self.text.grid(row=0, column=0, sticky="nsew")
         self.text.configure(state="disabled")
         self.text.tag_configure("current_match", background="#F9D65C", foreground="#111111")
+        self.text.tag_configure("selected_byte", background="#24476F", foreground="#FFFFFF")
         self.text.tag_configure("header", foreground="#666666")
 
         y_scroll = ttk.Scrollbar(body, orient="vertical", command=self._on_vertical_scroll)
@@ -95,6 +99,7 @@ class HexViewerApp(tk.Tk):
         self.offset_base_var.trace_add("write", self._on_offset_base_changed)
         self.text.bind("<Configure>", self._on_text_configure)
         self.text.bind("<MouseWheel>", self._on_mouse_wheel)
+        self.text.bind("<Button-1>", self._on_text_click)
         self.text.bind("<Prior>", lambda _event: self._move_lines(-self.visible_rows))
         self.text.bind("<Next>", lambda _event: self._move_lines(self.visible_rows))
         self.text.bind("<Home>", lambda _event: self._set_top_line(0))
@@ -120,6 +125,7 @@ class HexViewerApp(tk.Tk):
         self.matches = []
         self.current_match_index = -1
         self.current_match_length = 0
+        self.selected_byte_index = None
         self.top_line = 0
         self.status_var.set(self._file_status(loaded.source_type))
         self._render()
@@ -214,6 +220,7 @@ class HexViewerApp(tk.Tk):
             return
 
         data_index = self.model.data_index_for_address(address)
+        self.selected_byte_index = data_index
         line = self.model.line_for_data_index(data_index, self.bytes_per_line)
         self._set_top_line(line)
         actual = self.model.base_address + data_index
@@ -236,6 +243,8 @@ class HexViewerApp(tk.Tk):
         # Column width follows rendered content, so an oversized row setting does not
         # allocate a huge blank header before real bytes exist.
         hex_width = max([len("hex bytes")] + [len(line.hex_text) for line in rendered_lines])
+        self.render_offset_width = offset_width
+        self.render_hex_width = hex_width
 
         rows: list[str] = []
         rows.append(f"{'offset'.ljust(offset_width)}  {'hex bytes'.ljust(hex_width)}  ASCII")
@@ -247,6 +256,7 @@ class HexViewerApp(tk.Tk):
         self.text.insert("1.0", "\n".join(rows))
         self.text.tag_add("header", "1.0", "1.end")
         self._highlight_current_match(offset_width, hex_width)
+        self._highlight_selected_byte(offset_width, hex_width)
         self.text.configure(state="disabled")
         self.text.xview_moveto(x_position)
         self._update_vertical_scrollbar()
@@ -273,6 +283,28 @@ class HexViewerApp(tk.Tk):
             self.text.tag_add("current_match", f"{visible_line}.{hex_column}", f"{visible_line}.{hex_column + 2}")
             self.text.tag_add("current_match", f"{visible_line}.{ascii_column}", f"{visible_line}.{ascii_column + 1}")
 
+    def _highlight_selected_byte(self, offset_width: int, hex_width: int) -> None:
+        self.text.tag_remove("selected_byte", "1.0", "end")
+        if self.selected_byte_index is None:
+            return
+
+        self._tag_byte("selected_byte", self.selected_byte_index, offset_width, hex_width)
+        self.text.tag_raise("selected_byte")
+
+    def _tag_byte(self, tag: str, data_index: int, offset_width: int, hex_width: int) -> None:
+        line_index = data_index // self.bytes_per_line
+        visible_line = line_index - self.top_line + 2
+        if visible_line < 2 or visible_line > self.visible_rows + 1:
+            return
+
+        byte_column = data_index % self.bytes_per_line
+        hex_start = offset_width + 2
+        ascii_start = hex_start + hex_width + 2
+        hex_column = hex_start + byte_column * 3
+        ascii_column = ascii_start + byte_column
+        self.text.tag_add(tag, f"{visible_line}.{hex_column}", f"{visible_line}.{hex_column + 2}")
+        self.text.tag_add(tag, f"{visible_line}.{ascii_column}", f"{visible_line}.{ascii_column + 1}")
+
     def _on_vertical_scroll(self, *args: str) -> None:
         if args[0] == "moveto":
             self._set_top_line(round(float(args[1]) * self._max_top_line()))
@@ -285,6 +317,48 @@ class HexViewerApp(tk.Tk):
         step = -1 if event.delta > 0 else 1
         self._move_lines(step * 3)
         return "break"
+
+    def _on_text_click(self, event: tk.Event) -> str:
+        data_index = self._data_index_from_text_position(event.x, event.y)
+        if data_index is None:
+            return "break"
+
+        self.selected_byte_index = data_index
+        address = self.model.base_address + data_index
+        value = self.model.data[data_index]
+        self.status_var.set(f"已选中偏移 {self._format_offset(address)}，字节 0x{value:02X}。")
+        self._render()
+        return "break"
+
+    def _data_index_from_text_position(self, x: int, y: int) -> int | None:
+        # Translate a click in either the hex byte column or ASCII column back to
+        # the underlying byte index in the virtualized data buffer.
+        line_text, column_text = self.text.index(f"@{x},{y}").split(".")
+        text_line = int(line_text)
+        column = int(column_text)
+        if text_line <= 1:
+            return None
+
+        data_line = self.top_line + text_line - 2
+        line_end = int(self.text.index(f"{text_line}.end").split(".")[1])
+        hex_start = self.render_offset_width + 2
+        ascii_start = hex_start + self.render_hex_width + 2
+
+        byte_column: int | None = None
+        if hex_start <= column < ascii_start - 2:
+            relative = column - hex_start
+            if relative % 3 < 2:
+                byte_column = relative // 3
+        elif ascii_start <= column < line_end:
+            byte_column = column - ascii_start
+
+        if byte_column is None:
+            return None
+
+        data_index = data_line * self.bytes_per_line + byte_column
+        if data_index >= self.model.size:
+            return None
+        return data_index
 
     def _on_text_configure(self, _event: tk.Event) -> None:
         rows = self._calculate_visible_rows()
