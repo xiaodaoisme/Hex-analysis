@@ -333,8 +333,18 @@ class HexViewerApp(tk.Tk):
             return
 
         start, end = bounds
-        for data_index in range(start, end + 1):
-            self._tag_byte("selected_byte", data_index, offset_width, hex_width)
+        first_line = start // self.bytes_per_line
+        last_line = end // self.bytes_per_line
+        for line_index in range(first_line, last_line + 1):
+            visible_line = line_index - self.top_line + 2
+            if visible_line < 2 or visible_line > self.visible_rows + 1:
+                continue
+
+            line_start = line_index * self.bytes_per_line
+            line_end = min(line_start + self.bytes_per_line - 1, self.model.size - 1)
+            range_start = max(start, line_start)
+            range_end = min(end, line_end)
+            self._tag_byte_range("selected_byte", visible_line, range_start - line_start, range_end - line_start, offset_width, hex_width)
         self.text.tag_raise("selected_byte")
 
     def _tag_byte(self, tag: str, data_index: int, offset_width: int, hex_width: int) -> None:
@@ -350,6 +360,27 @@ class HexViewerApp(tk.Tk):
         ascii_column = ascii_start + byte_column
         self.text.tag_add(tag, f"{visible_line}.{hex_column}", f"{visible_line}.{hex_column + 2}")
         self.text.tag_add(tag, f"{visible_line}.{ascii_column}", f"{visible_line}.{ascii_column + 1}")
+
+    def _tag_byte_range(
+        self,
+        tag: str,
+        visible_line: int,
+        start_column: int,
+        end_column: int,
+        offset_width: int,
+        hex_width: int,
+    ) -> None:
+        hex_start = offset_width + 2 + start_column * 3
+        hex_end = offset_width + 2 + end_column * 3 + 2
+        ascii_start = offset_width + 2 + hex_width + 2 + start_column
+        ascii_end = offset_width + 2 + hex_width + 2 + end_column + 1
+        self.text.tag_add(tag, f"{visible_line}.{hex_start}", f"{visible_line}.{hex_end}")
+        self.text.tag_add(tag, f"{visible_line}.{ascii_start}", f"{visible_line}.{ascii_end}")
+
+    def _refresh_selection_highlight(self) -> None:
+        self.text.configure(state="normal")
+        self._highlight_selected_byte(self.render_offset_width, self.render_hex_width)
+        self.text.configure(state="disabled")
 
     def _scroll_to_byte(self, data_index: int, offset_width: int, hex_width: int) -> None:
         line_index = data_index // self.bytes_per_line
@@ -382,7 +413,7 @@ class HexViewerApp(tk.Tk):
         self.selection_anchor_index = data_index
         self._select_single_byte(data_index)
         self._set_selection_status()
-        self._render()
+        self._refresh_selection_highlight()
         return "break"
 
     def _on_text_drag(self, event: tk.Event) -> str:
@@ -395,7 +426,7 @@ class HexViewerApp(tk.Tk):
         self.selected_byte_index = data_index
         self.selection_range = (start, end)
         self._set_selection_status()
-        self._render()
+        self._refresh_selection_highlight()
         return "break"
 
     def _on_text_release(self, _event: tk.Event) -> str:
@@ -407,7 +438,7 @@ class HexViewerApp(tk.Tk):
         if data_index is not None and not self._selection_contains(data_index):
             self._select_single_byte(data_index)
             self._set_selection_status()
-            self._render()
+            self._refresh_selection_highlight()
 
         self.context_menu.tk_popup(event.x_root, event.y_root)
         return "break"
